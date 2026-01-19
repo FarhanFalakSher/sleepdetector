@@ -4,6 +4,8 @@ const SleepDetector = ({ onStatusChange }) => {
   const videoRef = useRef(null);
   const [started, setStarted] = useState(false);
   const [status, setStatus] = useState("Waiting");
+  const closedFramesRef = useRef(0);
+  const alertPlayedRef = useRef(false);
 
   useEffect(() => {
     if (!started) return;
@@ -25,25 +27,21 @@ const SleepDetector = ({ onStatusChange }) => {
       minTrackingConfidence: 0.6,
     });
 
-    let closedFrames = 0;
+    const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+    const EAR = (eye) => (dist(eye[1], eye[5]) + dist(eye[2], eye[4])) / (2 * dist(eye[0], eye[3]));
 
     faceMesh.onResults((results) => {
-      if (
-        !results.multiFaceLandmarks ||
-        results.multiFaceLandmarks.length === 0
-      ) {
+      const landmarks = results.multiFaceLandmarks?.[0];
+
+      if (!landmarks || landmarks.length < 468) {
         setStatus("No Face");
+        closedFramesRef.current = 0;
+        alertPlayedRef.current = false;
+        onStatusChange("Alert");
         return;
       }
 
-      const lm = results.multiFaceLandmarks[0];
-
-      // ✅ VERY IMPORTANT CHECK
-      if (!lm || lm.length < 468) {
-        return;
-      }
-
-      const safe = (i) => lm[i] ?? null;
+      const safe = (i) => landmarks[i] ?? null;
 
       const leftEyeIdx = [33, 160, 158, 133, 153, 144];
       const rightEyeIdx = [362, 385, 387, 263, 373, 380];
@@ -51,63 +49,56 @@ const SleepDetector = ({ onStatusChange }) => {
       const leftEye = leftEyeIdx.map(safe);
       const rightEye = rightEyeIdx.map(safe);
 
-      // If any landmark missing → skip frame
       if ([...leftEye, ...rightEye].some((p) => p === null)) return;
-
-      const dist = (a, b) =>
-        Math.hypot(a.x - b.x, a.y - b.y);
-
-      const EAR = (eye) =>
-        (dist(eye[1], eye[5]) + dist(eye[2], eye[4])) /
-        (2 * dist(eye[0], eye[3]));
 
       const ear = (EAR(leftEye) + EAR(rightEye)) / 2;
 
       if (ear < 0.21) {
-        closedFrames++;
+        closedFramesRef.current += 1;
         setStatus("Eyes Closed");
 
-        if (closedFrames > 18) {
+        if (closedFramesRef.current > 15 && !alertPlayedRef.current) {
+          alertPlayedRef.current = true;
           onStatusChange("Drowsy");
 
-          speechSynthesis.cancel();
-          speechSynthesis.speak(
-            new SpeechSynthesisUtterance(
-              "Wake up! You are feeling sleepy!"
-            )
+          const utter = new SpeechSynthesisUtterance(
+            "Wake up! You are feeling sleepy!"
           );
+          speechSynthesis.cancel();
+          speechSynthesis.speak(utter);
         }
       } else {
-        closedFrames = 0;
+        closedFramesRef.current = 0;
+        alertPlayedRef.current = false;
         setStatus("Eyes Open");
         onStatusChange("Alert");
       }
     });
 
     const camera = new window.Camera(videoRef.current, {
-      onFrame: async () => {
-        await faceMesh.send({ image: videoRef.current });
-      },
+      onFrame: async () => await faceMesh.send({ image: videoRef.current }),
       width: 640,
       height: 480,
     });
 
     camera.start();
-
     return () => camera.stop();
   }, [started, onStatusChange]);
 
   return (
-    <div className="flex flex-col items-center gap-4">
-      <p className="text-yellow-400 font-bold">
+    <div className="flex flex-col items-center gap-4 w-full px-2 md:px-0">
+      <p className="text-yellow-400 font-bold text-center text-lg md:text-xl">
         Detection Status: {status}
       </p>
 
       <button
         onClick={() => setStarted(true)}
-        className="bg-green-500 px-4 py-2 rounded"
+        disabled={started}
+        className={`bg-green-500 px-4 py-2 rounded text-white hover:bg-green-600 transition ${
+          started ? "opacity-50 cursor-not-allowed" : ""
+        }`}
       >
-        Start Detection
+        {started ? "Detection Started" : "Start Detection"}
       </button>
 
       <video
@@ -115,7 +106,7 @@ const SleepDetector = ({ onStatusChange }) => {
         autoPlay
         muted
         playsInline
-        className="w-full h-64 bg-black rounded"
+        className="w-full max-w-xl h-64 md:h-96 bg-black rounded shadow-lg object-cover"
       />
     </div>
   );
